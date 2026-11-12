@@ -1,0 +1,1369 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Isla Flotante 3D</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body,#game-container{width:100%;height:100%;overflow:hidden}
+body{background:#87ceeb;font-family:Arial,sans-serif}
+#game-container{position:relative}
+#ui{position:absolute;top:15px;left:15px;padding:12px 18px;background:#ffffffdd;border-radius:12px;color:#29435c;z-index:2}
+#ui h1{font-size:18px}
+#ui p{font-size:12px;margin-top:5px}
+#instructions{position:absolute;bottom:15px;left:50%;transform:translateX(-50%);background:#ffffffdd;padding:10px 16px;border-radius:10px;font-size:13px;white-space:nowrap;z-index:2}
+#health-panel{position:absolute;top:15px;right:15px;width:220px;padding:12px;background:#ffffffdf;border-radius:12px;color:#29435c;z-index:3}
+#health-panel strong{display:block;font-size:13px;margin-bottom:7px}
+#health-track{height:13px;background:#542d32;border-radius:8px;overflow:hidden;border:1px solid #ffffff}
+#health-fill{height:100%;width:100%;background:linear-gradient(90deg,#27b85a,#8be36b);transition:width .15s}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+</head>
+<body>
+<div id="game-container">
+<div id="ui">
+<h1>🦊 Isla flotante</h1>
+<p id="status">Explora la isla</p><p id="collectible-status">🧩 0/6 piezas · 💍 0/2 anillos</p>
+<div id="bat-counter" style="position:fixed;top:112px;left:16px;z-index:20;padding:8px 12px;background:rgba(15,20,32,.78);color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:10px;font: bold 15px system-ui;pointer-events:none">🦇 Murciélagos: 0/7</div>
+</div>
+<div id="instructions">W / S: avanzar y retroceder · A / D: girar · ESPACIO: saltar · F: rodar · J: espada · N: cambiar traje · V: bailar · Toca 🧩 piezas y 💍 anillos para recolectarlos · Y: iniciar duelo con el NPC · La isla crece al avanzar</div>
+<div id="health-panel"><strong>🐉 Vida del dragón</strong><div id="health-track"><div id="health-fill"></div></div><p id="health-text">8 / 8</p></div>
+</div>
+
+<script>
+(()=>{
+"use strict";
+
+const container=document.getElementById("game-container");
+if(!window.THREE)return;
+const uiHealthFill=document.getElementById("health-fill");
+const uiHealthText=document.getElementById("health-text");
+const uiBat=document.getElementById("bat-counter");
+const uiStatus=document.getElementById("status");
+const uiCollect=document.getElementById("collectible-status");
+function setText(el,t){if(el&&el._t!==t){el.textContent=t;el._t=t;}}
+
+// ESCENA
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0xefa58c);
+scene.fog=new THREE.Fog(0xc98c82,42,105);
+// Cielo de atardecer con degradado atmosférico: azul malva arriba y dorado en el horizonte.
+const sky=new THREE.Mesh(
+ new THREE.SphereGeometry(150,32,20),
+ new THREE.ShaderMaterial({
+  side:THREE.BackSide,
+  depthWrite:false,
+  uniforms:{topColor:{value:new THREE.Color(0x4b527c)},midColor:{value:new THREE.Color(0xd27b76)},horizonColor:{value:new THREE.Color(0xf7bd83)}},
+  vertexShader:`varying vec3 vWorldPosition; void main(){ vec4 worldPosition=modelMatrix*vec4(position,1.0); vWorldPosition=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader:`uniform vec3 topColor; uniform vec3 midColor; uniform vec3 horizonColor; varying vec3 vWorldPosition; void main(){ float h=normalize(vWorldPosition).y; float lower=smoothstep(-0.22,0.10,h); float upper=smoothstep(0.02,0.62,h); vec3 c=mix(horizonColor,midColor,lower); c=mix(c,topColor,upper); gl_FragColor=vec4(c,1.0); }`
+ })
+);
+sky.position.set(0,0,0);scene.add(sky);
+
+const camera=new THREE.OrthographicCamera(-18,18,18,-18,.1,200);
+camera.position.set(24,30,32);
+
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio||1,2));
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+function resize(){
+const width=Math.max(1,container.clientWidth);
+const height=Math.max(1,container.clientHeight);
+const aspect=width/height;
+
+camera.left=-18*aspect;
+camera.right=18*aspect;
+camera.top=18;
+camera.bottom=-18;
+camera.updateProjectionMatrix();
+
+renderer.setSize(width,height);
+}
+
+resize();
+addEventListener("resize",resize);
+
+// ILUMINACIÓN
+scene.add(new THREE.HemisphereLight(0xffd7bd,0x51465b,1.05));
+
+const sun=new THREE.DirectionalLight(0xffb477,1.45);
+sun.position.set(-28,7,-38);
+sun.castShadow=true;
+sun.shadow.mapSize.set(1024,1024);
+scene.add(sun);
+const sunsetDisc=new THREE.Mesh(
+ new THREE.SphereGeometry(2.35,32,24),
+ new THREE.MeshBasicMaterial({color:0xffd08a})
+);
+sunsetDisc.position.set(-31,8,-43);
+scene.add(sunsetDisc);
+const sunsetHalo=new THREE.Mesh(
+ new THREE.SphereGeometry(5.8,32,24),
+ new THREE.MeshBasicMaterial({color:0xffa477,transparent:true,opacity:.12})
+);
+sunsetHalo.position.copy(sunsetDisc.position);
+scene.add(sunsetHalo);
+
+
+// MATERIALES
+const mat={
+grass:new THREE.MeshStandardMaterial({color:0x65c957}),
+earth:new THREE.MeshStandardMaterial({color:0x9b623c}),
+darkEarth:new THREE.MeshStandardMaterial({color:0x70452e}),
+wood:new THREE.MeshStandardMaterial({color:0x79502f}),
+leaves:new THREE.MeshStandardMaterial({color:0x27a844}),
+leaves2:new THREE.MeshStandardMaterial({color:0x54c957}),
+stone:new THREE.MeshStandardMaterial({color:0x99999e}),
+darkStone:new THREE.MeshStandardMaterial({color:0x626879}),
+roof:new THREE.MeshStandardMaterial({color:0xb94b42}),
+gold:new THREE.MeshStandardMaterial({color:0xffd34e}),
+orange:new THREE.MeshStandardMaterial({color:0xf07825}),
+cream:new THREE.MeshStandardMaterial({color:0xffe2b7}),
+black:new THREE.MeshStandardMaterial({color:0x29252a}),
+white:new THREE.MeshStandardMaterial({color:0xffffff}),
+eye:new THREE.MeshStandardMaterial({color:0x171717}),
+blue:new THREE.MeshStandardMaterial({color:0x1755ce}),
+blueDark:new THREE.MeshStandardMaterial({color:0x103b91}),
+skin:new THREE.MeshStandardMaterial({color:0xf0b47e}),
+hair:new THREE.MeshStandardMaterial({color:0x17131d}),
+hairLight:new THREE.MeshStandardMaterial({color:0x292334}),
+silver:new THREE.MeshStandardMaterial({color:0xc8d2dc,metalness:.75,roughness:.28}),
+darkSilver:new THREE.MeshStandardMaterial({color:0x687786,metalness:.65,roughness:.35}),
+domeBlue:new THREE.MeshStandardMaterial({color:0x2786c7,metalness:.35,roughness:.4}),
+domeRed:new THREE.MeshStandardMaterial({color:0xb83e49,metalness:.3,roughness:.4}),
+domeGreen:new THREE.MeshStandardMaterial({color:0x32966e,metalness:.3,roughness:.4}),
+domeGold:new THREE.MeshStandardMaterial({color:0xe5b83e,metalness:.55,roughness:.3}),
+flowerPink:new THREE.MeshStandardMaterial({color:0xff78ad}),
+flowerYellow:new THREE.MeshStandardMaterial({color:0xffdf55}),
+flowerPurple:new THREE.MeshStandardMaterial({color:0xa987e8}),
+flowerCenter:new THREE.MeshStandardMaterial({color:0xffc928})
+};
+
+// OBSTÁCULOS
+const obstacles=[];
+
+const geoCache=new Map();
+function boxGeo(w,h,d){
+const k=w+"|"+h+"|"+d;
+let g=geoCache.get(k);
+if(!g){g=new THREE.BoxGeometry(w,h,d);geoCache.set(k,g);}
+return g;
+}
+function cube(x,y,z,w,h,d,material,parent=scene,solid=true){
+const m=new THREE.Mesh(boxGeo(w,h,d),material);
+m.position.set(x,y,z);
+m.castShadow=true;
+m.receiveShadow=true;
+parent.add(m);
+
+if(solid){
+obstacles.push({
+x,z,w,d,
+minY:y-h/2,
+maxY:y+h/2
+});
+}
+
+return m;
+}
+
+// ISLA
+const groundEarth=cube(0,-1,0,24,2,20,mat.earth,scene,false);
+const groundGrass=cube(0,.05,0,24.5,.35,20.5,mat.grass,scene,false);
+
+for(let i=0;i<12;i++){
+const x=(Math.random()-.5)*19;
+const z=(Math.random()-.5)*15;
+cube(x,-2.5,z,2,1.5,1.5,mat.darkEarth,scene,false);
+}
+
+// CRECIMIENTO ALEATORIO DE LA ISLA
+// La isla crece por una franja en un lado al azar cada vez que el jugador progresa.
+// Memoria: geometrías compartidas e InstancedMesh con capacidad fija (una sola llamada de dibujo por tipo).
+const bounds={minX:-12,maxX:12,minZ:-10,maxZ:10};
+const EXPAND_SIZE=6,EXPAND_STEP=2,MAX_EXPANSIONS=9;
+let expansions=0;
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const pick=arr=>arr[Math.floor(Math.random()*arr.length)];
+const unitBox=new THREE.BoxGeometry(1,1,1);
+const unitSphere=new THREE.SphereGeometry(.5,8,6);
+const tintMat=new THREE.MeshStandardMaterial({color:0xffffff});
+function makePool(geo,material,cap,tinted,shadow=true){
+ const m=new THREE.InstancedMesh(geo,material,cap);
+ m.count=0;m.frustumCulled=false;m.castShadow=shadow;m.receiveShadow=true;
+ if(tinted)m.setColorAt(0,new THREE.Color(0xffffff));
+ scene.add(m);return m;
+}
+const pool={
+ trunk:makePool(unitBox,mat.wood,60),
+ leaves:makePool(unitBox,tintMat,130,true),
+ bush:makePool(unitBox,mat.leaves2,100),
+ stem:makePool(unitBox,mat.leaves,100,false,false),
+ bloom:makePool(unitSphere,tintMat,100,true,false),
+ rock:makePool(unitBox,mat.stone,30),
+ under:makePool(unitBox,mat.darkEarth,40,false,false)
+};
+const tmpObj=new THREE.Object3D(),tmpCol=new THREE.Color();
+function put(p,x,y,z,sx,sy,sz,color){
+ if(p.count>=p.instanceMatrix.count)return false;
+ tmpObj.position.set(x,y,z);tmpObj.rotation.set(0,0,0);tmpObj.scale.set(sx,sy,sz);tmpObj.updateMatrix();
+ p.setMatrixAt(p.count,tmpObj.matrix);
+ if(color!==undefined){p.setColorAt(p.count,tmpCol.setHex(color));p.instanceColor.needsUpdate=true;}
+ p.count++;p.instanceMatrix.needsUpdate=true;
+ return true;
+}
+function refreshGround(){
+ const w=bounds.maxX-bounds.minX,d=bounds.maxZ-bounds.minZ;
+ const cx=(bounds.minX+bounds.maxX)/2,cz=(bounds.minZ+bounds.maxZ)/2;
+ groundEarth.scale.set(w/24,1,d/20);groundEarth.position.set(cx,-1,cz);
+ groundGrass.scale.set((w+.5)/24.5,1,(d+.5)/20.5);groundGrass.position.set(cx,.05,cz);
+}
+function decorate(x0,x1,z0,z1){
+ const px=()=>rnd(x0+.8,x1-.8),pz=()=>rnd(z0+.8,z1-.8);
+ const trees=3+Math.floor(Math.random()*3);
+ for(let i=0;i<trees;i++){
+  if(pool.trunk.count>=60||pool.leaves.count>=128)break;
+  const x=px(),z=pz(),s=rnd(.8,1.2);
+  put(pool.trunk,x,.9*s,z,.55*s,1.8*s,.55*s);
+  put(pool.leaves,x,2*s,z,2*s,1.8*s,2*s,pick([0x27a844,0x2fb34d,0x3bb34f]));
+  put(pool.leaves,x-.4*s,2.8*s,z,1.4*s,1.2*s,1.4*s,pick([0x54c957,0x62d05f]));
+  obstacles.push({x,z,w:.55*s,d:.55*s,minY:0,maxY:1.8*s});
+ }
+ const bushes=5+Math.floor(Math.random()*4);
+ for(let i=0;i<bushes;i++){const k=rnd(.6,1);put(pool.bush,px(),.1+.4*k,pz(),.8*k,.8*k,.8*k);}
+ const flowers=6+Math.floor(Math.random()*4);
+ for(let i=0;i<flowers;i++){
+  const x=px(),z=pz();
+  put(pool.stem,x,.25,z,.07,.42,.07);
+  put(pool.bloom,x,.55,z,.34,.22,.34,pick([0xff78ad,0xffdf55,0xa987e8]));
+ }
+ const rocks=1+Math.floor(Math.random()*2);
+ for(let i=0;i<rocks;i++){
+  const w=rnd(1,1.8),h=rnd(.6,1.1),d=rnd(1,1.8),x=px(),z=pz();
+  if(put(pool.rock,x,h/2,z,w,h,d))obstacles.push({x,z,w,d,minY:0,maxY:h});
+ }
+ for(let i=0;i<3;i++)put(pool.under,rnd(x0+1,x1-1),-2.5,rnd(z0+1,z1-1),2,1.5,1.5);
+}
+function expandIsland(){
+ if(expansions>=MAX_EXPANSIONS)return;
+ expansions++;
+ const side=Math.floor(Math.random()*4);
+ let x0,x1,z0,z1;
+ if(side===0){x0=bounds.maxX;x1=x0+EXPAND_SIZE;z0=bounds.minZ;z1=bounds.maxZ;bounds.maxX=x1;}
+ else if(side===1){x1=bounds.minX;x0=x1-EXPAND_SIZE;z0=bounds.minZ;z1=bounds.maxZ;bounds.minX=x0;}
+ else if(side===2){z0=bounds.maxZ;z1=z0+EXPAND_SIZE;x0=bounds.minX;x1=bounds.maxX;bounds.maxZ=z1;}
+ else{z1=bounds.minZ;z0=z1-EXPAND_SIZE;x0=bounds.minX;x1=bounds.maxX;bounds.minZ=z0;}
+ refreshGround();
+ decorate(x0,x1,z0,z1);
+}
+function checkExpansion(){
+ const progress=puzzleCount+ringCount+batsDefeated+(dragonDefeated?3:0);
+ const target=Math.min(MAX_EXPANSIONS,Math.floor(progress/EXPAND_STEP));
+ while(expansions<target)expandIsland();
+}
+
+// CASTILLO
+cube(0,1.3,-5,10,2.5,.7,mat.stone);
+
+// Pared frontal dividida para dejar un paso.
+// Conserva el aspecto del castillo y evita encerrar a los personajes.
+cube(-3.5,1.3,5,3,2.5,.7,mat.stone);
+cube(3.5,1.3,5,3,2.5,.7,mat.stone);
+
+cube(-5,1.3,0,.7,2.5,10,mat.stone);
+cube(5,1.3,0,.7,2.5,10,mat.stone);
+
+for(const x of [-5,5]){
+for(const z of [-5,5]){
+cube(x,2.1,z,1.8,4,1.8,mat.darkStone);
+cube(x,4.2,z,2,.5,2,mat.stone);
+}
+}
+
+cube(-5,5,-5,1.5,2,1.5,mat.stone);
+cube(5,4,5,1.5,1,1.5,mat.stone);
+cube(-3,2,-5,2,1,.8,mat.darkStone);
+cube(2,2,5,2,1,.8,mat.darkStone);
+cube(-5,1.2,-2,.8,1.5,2,mat.stone);
+cube(5,1.2,2,.8,1.5,2,mat.stone);
+cube(-2,.5,-3,1.5,.5,1,mat.stone);
+cube(2,.5,3,1.2,.5,1.5,mat.stone);
+cube(0,1.2,-5,.9,2.2,.15,mat.wood);
+cube(0,2.4,-5,1.2,.4,.4,mat.darkStone);
+cube(0,6,-5,.12,2,.12,mat.gold);
+cube(.7,6.6,-5,.9,.6,.12,mat.roof);
+
+// Cúpulas decorativas sobre las cuatro torres del castillo.
+function dome(x,z,material){
+ const shell=new THREE.Mesh(
+  new THREE.SphereGeometry(.92,16,10,0,Math.PI*2,0,Math.PI/2),
+  material
+ );
+ shell.position.set(x,4.45,z);
+ shell.castShadow=true;
+ shell.receiveShadow=true;
+ scene.add(shell);
+ const tip=new THREE.Mesh(new THREE.ConeGeometry(.13,.65,8),mat.gold);
+ tip.position.set(x,5.35,z);
+ tip.castShadow=true;
+ scene.add(tip);
+}
+dome(-5,-5,mat.domeBlue);
+dome(5,-5,mat.domeRed);
+dome(-5,5,mat.domeGreen);
+dome(5,5,mat.domeGold);
+// Ampliación visual del castillo: almenas, ventanales, contrafuertes y estandartes.
+// Son elementos decorativos no sólidos para no alterar las rutas ni las colisiones.
+for(const x of [-4,-2,0,2,4]){
+ cube(x,2.75,-5,.72,.55,.82,mat.stone,scene,false);
+ cube(x,2.75,5,.72,.55,.82,mat.stone,scene,false);
+}
+for(const z of [-4,-2,0,2,4]){
+ cube(-5,2.75,z,.82,.55,.72,mat.stone,scene,false);
+ cube(5,2.75,z,.82,.55,.72,mat.stone,scene,false);
+}
+const windowMat=new THREE.MeshStandardMaterial({color:0x27364c,emissive:0x18283d,emissiveIntensity:.35});
+for(const z of [-3.5,-1.5,1.5,3.5]){
+ cube(-5.37,1.55,z,.035,.72,.34,windowMat,scene,false);
+ cube(5.37,1.55,z,.035,.72,.34,windowMat,scene,false);
+}
+for(const x of [-3.5,-1.5,1.5,3.5]){
+ cube(x,1.55,5.37,.34,.72,.035,windowMat,scene,false);
+ cube(x,1.55,-5.37,.34,.72,.035,windowMat,scene,false);
+}
+for(const x of [-5,5]){
+ for(const z of [-5,5]){
+  cube(x,5.0,z,1.25,.35,1.25,mat.darkStone,scene,false);
+  cube(x,5.25,z,.9,.22,.9,mat.gold,scene,false);
+ }
+}
+// Estandartes en la fachada exterior
+const bannerRed=new THREE.MeshStandardMaterial({color:0xb83245,side:THREE.DoubleSide});
+const bannerBlue=new THREE.MeshStandardMaterial({color:0x3159a8,side:THREE.DoubleSide});
+function banner(x,z,material){
+ const pole=new THREE.Mesh(new THREE.CylinderGeometry(.045,.045,2.3,8),mat.gold);
+ pole.position.set(x,3.5,z);scene.add(pole);
+ const cloth=new THREE.Mesh(new THREE.PlaneGeometry(.85,1.05),material);
+ cloth.position.set(x,3.75,z-.08);scene.add(cloth);
+}
+banner(-2.7,5.42,bannerRed);
+banner(2.7,5.42,bannerBlue);
+
+
+// ÁRBOLES
+function tree(x,z,s=1){
+cube(x,.9*s,z,.55*s,1.8*s,.55*s,mat.wood);
+
+// Las hojas son decorativas y no bloquean a los personajes.
+cube(x,2*s,z,2*s,1.8*s,2*s,mat.leaves,scene,false);
+cube(x-.4*s,2.8*s,z,1.4*s,1.2*s,1.4*s,mat.leaves2,scene,false);
+cube(x+.5*s,1.9*s,z-.5*s,1*s,1*s,1*s,mat.leaves2,scene,false);
+// Frutos visibles entre las hojas.
+const fruitMat=new THREE.MeshStandardMaterial({color:(Math.abs(x+z)%2<1)?0xc93438:0xffbd35,roughness:.55});
+for(const [fx,fz] of [[-.48,-.42],[.48,.36],[-.18,.5]]){const fruit=new THREE.Mesh(new THREE.SphereGeometry(.16*s,8,7),fruitMat);fruit.position.set(x+fx*s,2.15*s+Math.abs(fx)*.3,z+fz*s);fruit.castShadow=true;scene.add(fruit);}
+
+}
+
+[
+[-9,-7,1],
+[-8,0,1.1],
+[-9,7,.9],
+[9,-7,1],
+[9,0,1.2],
+[9,7,1],
+[-3,-8,.8],
+[3,-8,.9],
+[-3,8,1],
+[3,8,.8]
+].forEach(p=>tree(...p));
+
+// Arbustos decorativos
+for(let i=0;i<18;i++){
+const x=(Math.random()-.5)*20;
+const z=(Math.random()-.5)*16;
+
+if(Math.abs(x)<6&&Math.abs(z)<6)continue;
+
+cube(x,.5,z,.8,.8,.8,mat.leaves2,scene,false);
+if(i%2===0){const berry=new THREE.Mesh(new THREE.SphereGeometry(.13,8,6),i%4===0?mat.flowerPink:mat.flowerYellow);berry.position.set(x,.98,z);scene.add(berry);}
+
+}
+
+// Pequeñas flores ornamentales repartidas por el jardín.
+function flower(x,z,petalMaterial){
+ const stem=new THREE.Mesh(new THREE.CylinderGeometry(.035,.045,.42,6),mat.leaves);
+ stem.position.set(x,.25,z);
+ scene.add(stem);
+ const bloom=new THREE.Group();
+ bloom.position.set(x,.52,z);
+ scene.add(bloom);
+ const petalGeo=new THREE.SphereGeometry(.13,8,6);
+ for(let i=0;i<5;i++){
+  const a=i*Math.PI*2/5;
+  const petal=new THREE.Mesh(petalGeo,petalMaterial);
+  petal.position.set(Math.cos(a)*.16,0,Math.sin(a)*.16);
+  petal.scale.set(1,.65,1);
+  bloom.add(petal);
+ }
+ const center=new THREE.Mesh(new THREE.SphereGeometry(.09,8,6),mat.flowerCenter);
+ bloom.add(center);
+}
+flower(-7,-3,mat.flowerPink);
+flower(7,-3,mat.flowerYellow);
+flower(-7,4,mat.flowerPurple);
+flower(7,4,mat.flowerPink);
+flower(-3,7,mat.flowerYellow);
+flower(4,-7,mat.flowerPurple);
+
+
+// DRAGÓN GUARDIÁN: ocupa el patio central del castillo. No hay cueva ni túneles.
+const dragon=new THREE.Group();scene.add(dragon);dragon.position.set(0,.25,-3.1);
+const dragonMat=new THREE.MeshStandardMaterial({color:0x28734b,roughness:.7});
+const dragonBelly=new THREE.MeshStandardMaterial({color:0xd4a45a,roughness:.8});
+const dragonHorn=new THREE.MeshStandardMaterial({color:0xe7d6a0});
+const dragonEye=new THREE.MeshStandardMaterial({color:0xffcc33,emissive:0xff5a00,emissiveIntensity:1.2});
+function dbox(x,y,z,w,h,d,m){const o=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);o.position.set(x,y,z);o.castShadow=true;dragon.add(o);return o;}
+dbox(0,1.35,0,2.1,1.55,1.55,dragonMat);dbox(0,1.22,-.82,1.25,1.2,.18,dragonBelly);
+dbox(0,2.15,-1.12,1.25,.9,1.05,dragonMat);dbox(-.35,2.25,-1.66,.16,.16,.08,dragonEye);dbox(.35,2.25,-1.66,.16,.16,.08,dragonEye);
+dbox(-.48,2.75,-1.08,.2,.65,.22,dragonHorn);dbox(.48,2.75,-1.08,.2,.65,.22,dragonHorn);
+dbox(0,1.82,-1.72,.72,.18,.18,dragonBelly);
+const wings=[];for(const side of [-1,1]){const wing=new THREE.Group();wing.position.set(side*1,1.8,.1);dragon.add(wing);const membrane=new THREE.Mesh(new THREE.BoxGeometry(1.8,.12,1.55),dragonMat);membrane.position.set(side*.78,.05,.1);membrane.rotation.z=side*.35;wing.add(membrane);const spar=new THREE.Mesh(new THREE.BoxGeometry(1.9,.13,.14),dragonHorn);spar.position.set(side*.78,.12,-.1);spar.rotation.z=side*.35;wing.add(spar);wings.push(wing);}
+dbox(-.62,.55,.25,.45,.9,.55,dragonMat);dbox(.62,.55,.25,.45,.9,.55,dragonMat);
+const tail=dbox(0,1.1,1.35,.55,.55,1.6,dragonMat);tail.rotation.x=-.18;
+let dragonHealth=8,dragonAttack=2.6,dragonFireTimer=1.8,dragonDefeated=false,playerBurn=0,swordCooldown=0,swordSwing=0;
+// Estado de controles y daño (declarado explícitamente para evitar ReferenceError).
+let rollCooldown=0,rollingTime=0,rollHitDone=false,playerDamageCooldown=0;
+const fireballs=[];
+// Llamas alrededor del héroe durante el impacto: efecto visible de quemadura.
+const burnFx=new THREE.Group();playerBurn=0;
+const burnMat=new THREE.MeshBasicMaterial({color:0xff6a16,transparent:true,opacity:.88});
+const burnCoreMat=new THREE.MeshBasicMaterial({color:0xffe18a,transparent:true,opacity:.9});
+for(let i=0;i<9;i++){const flame=new THREE.Mesh(new THREE.ConeGeometry(.16,.62,6),i%2?burnMat:burnCoreMat);const a=i*Math.PI*2/9;flame.position.set(Math.cos(a)*.42,.45+(i%3)*.38,Math.sin(a)*.42);burnFx.add(flame);} 
+const fireMat=new THREE.MeshBasicMaterial({color:0xff5a12});
+const fireCore=new THREE.MeshBasicMaterial({color:0xffe58a});
+const flameLight=new THREE.PointLight(0xff5b16,2.5,7);
+// Espada cúbica del héroe, visible en la mano derecha.
+const sword=new THREE.Group();const blade=new THREE.Mesh(new THREE.BoxGeometry(.16,1.15,.13),new THREE.MeshStandardMaterial({color:0xdcecff,metalness:.85,roughness:.2}));blade.position.y=.72;sword.add(blade);const guard=new THREE.Mesh(new THREE.BoxGeometry(.55,.12,.2),mat.gold);guard.position.y=.16;sword.add(guard);const grip=new THREE.Mesh(new THREE.BoxGeometry(.17,.42,.17),mat.wood);grip.position.y=-.12;sword.add(grip);sword.position.set(.7,1.05,-.25);sword.rotation.z=-.45;
+// Murciélagos con alas articuladas que sobrevuelan el castillo.
+const bats=[];const batMat=new THREE.MeshStandardMaterial({color:0x211e2a,roughness:1});
+let batsDefeated=0,swordSwingActive=false;
+for(let i=0;i<7;i++){const b=new THREE.Group();const body=new THREE.Mesh(new THREE.BoxGeometry(.22,.28,.32),batMat);b.add(body);const wingsB=[];for(const side of [-1,1]){const w=new THREE.Mesh(new THREE.BoxGeometry(.62,.07,.3),batMat);w.position.x=side*.34;wingsB.push(w);b.add(w);}b.userData={wings:wingsB,phase:i*1.7,radius:5+i*.55,speed:.25+i*.07,height:5+i%3,dead:false};scene.add(b);bats.push(b);}
+
+// La espada puede alcanzar murciélagos cuando bajan a la altura del zorro.
+function updateBatSwordHits(){
+ if(!swordSwingActive || swordSwing<=0 || swordSwing>.42)return;
+ for(const b of bats){
+  if(b.userData.dead)continue;
+  const dx=b.position.x-player.root.position.x;
+  const dz=b.position.z-player.root.position.z;
+  const dy=Math.abs(b.position.y-(player.root.position.y+1.1));
+  if(dx*dx+dz*dz<3.2*3.2 && dy<3.1){
+   b.userData.dead=true;
+   b.visible=false;
+   batsDefeated++;
+  }
+ }
+ if(bats.every(b=>b.userData.dead))swordSwingActive=false;
+}
+
+// Ciclo día-atardecer-noche-amanecer, de 150 segundos por vuelta.
+const skyMaterial=sky.material;const cycleDuration=150;let cycleTime=0;
+const cycleColors=[new THREE.Color(0x78b9ed),new THREE.Color(0xe9a078),new THREE.Color(0x101a3d),new THREE.Color(0x5d668e),new THREE.Color(0x78b9ed)];
+const cycleFog=[new THREE.Color(0x9bc8e8),new THREE.Color(0xd58b73),new THREE.Color(0x101a32),new THREE.Color(0x666987),new THREE.Color(0x9bc8e8)];
+const cycleTop=[new THREE.Color(0x3678bd),new THREE.Color(0x45466f),new THREE.Color(0x050b22),new THREE.Color(0x27365d),new THREE.Color(0x3678bd)];
+const cycleMid=[new THREE.Color(0x8ec7ed),new THREE.Color(0xc66d70),new THREE.Color(0x17264b),new THREE.Color(0x9a7180),new THREE.Color(0x8ec7ed)];
+const cycleHorizon=[new THREE.Color(0xd8e9f3),new THREE.Color(0xffb36f),new THREE.Color(0x26385f),new THREE.Color(0xffb77d),new THREE.Color(0xd8e9f3)];
+function blendCycle(arr,t,out){const q=t*(arr.length-1),i=Math.min(arr.length-2,Math.floor(q));return out.copy(arr[i]).lerp(arr[i+1],q-i);}
+const sunNightColor=new THREE.Color(0x9bbcff),sunDayColor=new THREE.Color(0xffbd82);
+function updateDayNight(dt){
+ cycleTime=(cycleTime+dt/cycleDuration)%1;const t=cycleTime;
+ blendCycle(cycleColors,t,scene.background);
+ blendCycle(cycleFog,t,scene.fog.color);
+ blendCycle(cycleTop,t,skyMaterial.uniforms.topColor.value);
+ blendCycle(cycleMid,t,skyMaterial.uniforms.midColor.value);
+ blendCycle(cycleHorizon,t,skyMaterial.uniforms.horizonColor.value);
+ const daylight=Math.max(.12,Math.sin(t*Math.PI*2-Math.PI/2)*.5+.5);
+ sun.intensity=.18+daylight*1.25;
+ sun.color.copy(sunNightColor).lerp(sunDayColor,daylight);
+ sun.position.set(-28,2+daylight*25,-38);
+ sunsetDisc.visible=t>.12&&t<.48;
+ sunsetDisc.position.y=2+Math.sin(t*Math.PI*2)*5;
+ sunsetHalo.visible=sunsetDisc.visible;
+ sunsetHalo.position.copy(sunsetDisc.position);
+}
+const fireOuterGeo=new THREE.SphereGeometry(.42,12,10),fireInnerGeo=new THREE.SphereGeometry(.23,10,8);
+const hitPoint=new THREE.Vector3();
+function spawnDragonFire(){
+ if(dragonDefeated)return;
+ const orb=new THREE.Group();
+ orb.add(new THREE.Mesh(fireOuterGeo,fireMat),new THREE.Mesh(fireInnerGeo,fireCore));
+ orb.position.set(dragon.position.x,dragon.position.y+1.7,dragon.position.z-1.7);
+ const target=player.root.position.clone();target.y+=.9;
+ const dir=target.sub(orb.position).normalize();
+ orb.userData={velocity:dir.multiplyScalar(8.5),life:4};
+ scene.add(orb);fireballs.push(orb);
+}
+function clearFireballs(){for(const f of fireballs)scene.remove(f);fireballs.length=0;}
+function updateDragon(dt){
+ if(dragonDefeated)return;
+ dragonAttack-=dt;dragonFireTimer-=dt;
+ dragon.rotation.y=Math.sin(clock.elapsedTime*.45)*.18;
+ wings[0].rotation.z=Math.sin(clock.elapsedTime*5)*.28;
+ wings[1].rotation.z=-Math.sin(clock.elapsedTime*5)*.28;
+ if(dragonFireTimer<=0){spawnDragonFire();dragonFireTimer=2.5+Math.random()*1.1;}
+ for(let i=fireballs.length-1;i>=0;i--){
+  const f=fireballs[i];
+  f.position.addScaledVector(f.userData.velocity,dt);
+  f.userData.life-=dt;f.rotation.x+=dt*4;
+  f.scale.setScalar(1+Math.sin(clock.elapsedTime*18)*.12);
+  hitPoint.set(player.root.position.x,player.root.position.y+1,player.root.position.z);
+  if(f.position.distanceTo(hitPoint)<.95&&playerDamageCooldown<=0){
+   playerBurn=1.6;playerDamageCooldown=2.2;player.velocityY=17;player.grounded=false;player.falling=true;
+   const away=player.root.position.clone().sub(f.position).normalize();
+   player.root.position.x+=away.x*1.5;player.root.position.z+=away.z*1.5;
+   scene.remove(f);fireballs.splice(i,1);continue;
+  }
+  if(f.userData.life<=0){scene.remove(f);fireballs.splice(i,1);}
+ }
+ if(swordSwing>.18 && !rollHitDone && Math.hypot(player.root.position.x-dragon.position.x,player.root.position.z-dragon.position.z)<3.1){
+  dragonHealth=Math.max(0,dragonHealth-1);
+  rollHitDone=true;
+  if(dragonHealth===0){dragonDefeated=true;dragon.visible=false;clearFireballs();}
+ }
+}
+
+// CONSTRUCTOR DE PERSONAJES
+function createCharacter(type){
+const root=new THREE.Group();
+const body=new THREE.Group();
+root.add(body);
+
+const isGoku=type==="goku";
+
+const c=isGoku?{
+main:mat.blue,
+shirt:mat.blueDark,
+skin:mat.skin,
+hair:mat.hair,
+detail:mat.hairLight,
+boots:mat.blueDark
+}:{
+main:mat.orange,
+shirt:mat.cream,
+skin:mat.cream,
+hair:mat.orange,
+detail:mat.black,
+boots:mat.black
+};
+
+// TORSO
+cube(0,1.05,0,.85,1,.55,c.main,body);
+cube(0,1.05,-.29,.48,.75,.05,c.shirt,body);
+
+// Armadura de caballero para el guardián secundario.
+if(isGoku){
+ cube(0,1.08,-.345,.96,.78,.16,mat.silver,body);
+ cube(0,1.48,-.36,.72,.13,.19,mat.gold,body);
+ cube(0,.72,-.36,.82,.12,.19,mat.darkSilver,body);
+ cube(0,1.08,-.445,.22,.34,.035,mat.gold,body);
+}
+
+// CABEZA
+const head=new THREE.Group();
+head.position.set(0,1.9,0);
+body.add(head);
+
+cube(0,0,0,.85,.8,.75,c.skin,head);
+
+if(!isGoku){
+
+cube(0,-.18,-.39,.48,.28,.08,mat.cream,head);
+cube(-.29,.52,0,.25,.55,.3,mat.orange,head);
+cube(.29,.52,0,.25,.55,.3,mat.orange,head);
+cube(-.29,.55,-.16,.12,.3,.08,mat.cream,head);
+cube(.29,.55,-.16,.12,.3,.08,mat.cream,head);
+cube(0,-.05,-.43,.35,.23,.2,mat.cream,head);
+cube(0,.01,-.55,.14,.1,.08,mat.black,head);
+
+}else{
+
+// CABELLO GOKU
+cube(0,.37,0,.95,.45,.8,c.hair,head);
+cube(-.34,.58,0,.3,.55,.4,c.hair,head);
+cube(0,.75,0,.3,.65,.35,c.hair,head);
+cube(.32,.58,0,.3,.55,.4,c.hair,head);
+cube(-.48,.3,0,.25,.35,.3,c.hair,head);
+cube(.48,.3,0,.25,.35,.3,c.hair,head);
+cube(-.2,.15,-.39,.1,.13,.08,mat.eye,head);
+cube(.2,.15,-.39,.1,.13,.08,mat.eye,head);
+cube(0,-.05,-.43,.25,.12,.08,mat.skin,head);
+
+// Diadema y protectores laterales: conserva visible el cabello de Goku.
+cube(0,.34,-.405,.92,.16,.12,mat.silver,head);
+cube(0,.43,-.48,.34,.09,.08,mat.gold,head);
+cube(-.48,-.02,0,.13,.48,.48,mat.darkSilver,head);
+cube(.48,-.02,0,.13,.48,.48,mat.darkSilver,head);
+
+}
+
+// CUELLO Y CINTURÓN
+if(isGoku){
+cube(0,1.48-1.9,0,.4,.25,.4,mat.skin,body);
+cube(0,.7,0,.88,.13,.58,mat.roof,body);
+}
+
+// BRAZOS
+const arms=[];
+
+for(const x of [-.53,.53]){
+const p=new THREE.Group();
+p.position.set(x,1.45,0);
+body.add(p);
+
+cube(0,-.27,0,.3,.65,.35,c.main,p);
+cube(0,-.55,-.01,.3,.18,.36,c.skin,p);
+
+if(isGoku){
+ cube(0,-.02,0,.48,.28,.46,mat.silver,p);
+ cube(0,-.2,-.015,.37,.12,.39,mat.gold,p);
+ cube(0,-.43,-.02,.38,.22,.4,mat.darkSilver,p);
+}
+
+arms.push(p);
+}
+
+// PIERNAS
+const legs=[];
+
+for(const x of [-.23,.23]){
+const p=new THREE.Group();
+p.position.set(x,.58,0);
+body.add(p);
+
+cube(0,-.22,0,.32,.5,.35,isGoku?mat.blue:mat.orange,p);
+cube(0,-.45,-.08,.36,.2,.48,isGoku?mat.blueDark:mat.black,p);
+
+if(isGoku){
+ cube(0,-.25,-.19,.4,.43,.16,mat.silver,p);
+ cube(0,-.08,-.285,.34,.09,.05,mat.gold,p);
+}
+
+legs.push(p);
+}
+
+// COLA DEL ZORRO
+let tail=null;
+
+if(!isGoku){
+tail=new THREE.Group();
+tail.position.set(0,.75,.35);
+body.add(tail);
+
+cube(0,0,.22,.42,.42,.8,mat.orange,tail);
+cube(0,0,.62,.44,.44,.35,mat.cream,tail);
+}
+
+return {
+root,body,head,arms,legs,tail,
+walkTime:0,
+velocityY:0,
+grounded:true,
+falling:false,
+jumpPressed:false
+};
+}
+
+// PERSONAJES
+const worldObstacleCount=obstacles.length;
+
+const player=createCharacter("fox");
+scene.add(player.root);
+player.root.add(sword);
+player.root.add(burnFx);burnFx.visible=false;
+player.root.position.set(0,.25,8);
+
+const npc=createCharacter("goku");
+scene.add(npc.root);
+
+// NPC dentro del patio, cerca del paso de salida.
+npc.root.position.set(-1,.25,1);
+// SISTEMAS NUEVOS: duelo posterior al dragón, vestuario y pequeñas biòsferas.
+let fightMode=false, playerFightHealth=5, npcFightHealth=5;
+let outfitIndex=0, outfitGroups=[];
+const npcBlade=new THREE.Group();
+npcBlade.position.set(.48,.55,-.25);
+npc.root.add(npcBlade);
+const bladeMat=new THREE.MeshStandardMaterial({color:0xcbd7e5,metalness:.85,roughness:.2});
+const hiltMat=new THREE.MeshStandardMaterial({color:0x9b5b24,metalness:.55});
+const npcBladePart=new THREE.Mesh(new THREE.BoxGeometry(.10,.9,.13),bladeMat);
+npcBladePart.position.y=.48;npcBlade.add(npcBladePart);
+const npcHilt=new THREE.Mesh(new THREE.BoxGeometry(.38,.12,.18),hiltMat);
+npcHilt.position.y=.12;npcBlade.add(npcHilt);
+npcBlade.visible=false;
+
+// Trajes intercambiables con N: capa, casco, armadura y corona.
+function makeWearable(color,kind){
+ const g=new THREE.Group();player.root.add(g);
+ const cloth=new THREE.MeshStandardMaterial({color,roughness:.72});
+ if(kind===0){const cape=new THREE.Mesh(new THREE.BoxGeometry(.95,1.15,.16),cloth);cape.position.set(0,1.0,.48);g.add(cape);}
+ if(kind===1){const armor=new THREE.Mesh(new THREE.BoxGeometry(.95,.72,.62),cloth);armor.position.set(0,1.05,0);g.add(armor);const helmet=new THREE.Mesh(new THREE.ConeGeometry(.38,.65,4),hiltMat);helmet.position.y=2.35;g.add(helmet);}
+ if(kind===2){const hood=new THREE.Mesh(new THREE.SphereGeometry(.48,10,8,0,Math.PI*2,0,Math.PI/2),cloth);hood.position.y=2.25;g.add(hood);const cape=new THREE.Mesh(new THREE.BoxGeometry(1,1.25,.14),cloth);cape.position.set(0,1,.46);g.add(cape);}
+ if(kind===3){const crown=new THREE.Mesh(new THREE.ConeGeometry(.42,.65,5),cloth);crown.position.y=2.35;g.add(crown);const shoulder=new THREE.Mesh(new THREE.BoxGeometry(1.1,.25,.7),cloth);shoulder.position.y=1.45;g.add(shoulder);}
+ if(kind===4){
+  const vest=new THREE.Mesh(new THREE.BoxGeometry(.82,.82,.58),cloth);vest.position.set(0,1.05,0);g.add(vest);
+  const hat=new THREE.Mesh(new THREE.CylinderGeometry(.43,.38,.16,8),new THREE.MeshStandardMaterial({color:0x76502b,roughness:.95}));hat.position.y=2.28;g.add(hat);
+  const brim=new THREE.Mesh(new THREE.CylinderGeometry(.58,.58,.07,8),new THREE.MeshStandardMaterial({color:0x76502b,roughness:.95}));brim.position.y=2.19;g.add(brim);
+  const pack=new THREE.Mesh(new THREE.BoxGeometry(.55,.68,.28),new THREE.MeshStandardMaterial({color:0x8b552d,roughness:.9}));pack.position.set(0,1.05,.43);g.add(pack);
+  const belt=new THREE.Mesh(new THREE.BoxGeometry(.9,.13,.64),new THREE.MeshStandardMaterial({color:0x4a3420,roughness:.9}));belt.position.y=.68;g.add(belt);
+  for(const side of [-1,1]){const pouch=new THREE.Mesh(new THREE.BoxGeometry(.2,.24,.2),new THREE.MeshStandardMaterial({color:0xb17b3d}));pouch.position.set(side*.48,.75,0);g.add(pouch);}
+ }
+ g.visible=false;outfitGroups.push(g);
+}
+makeWearable(0x2f9b55,0);makeWearable(0x8c929e,1);makeWearable(0x593d9b,2);makeWearable(0xd7a52d,3);
+makeWearable(0x557b3d,4); // Traje de recolección: chaleco, sombrero, mochila y bolsas.
+function cycleOutfit(){outfitGroups.forEach(g=>g.visible=false);outfitIndex=(outfitIndex+1)%outfitGroups.length;outfitGroups[outfitIndex].visible=true;}
+
+// Zonas de biòsfera accesibles: bosque, humedal y pradera floral.
+const biomeZones=[
+ {x:-8,z:2,color:0x3d8c49,label:"Bosque húmedo"},
+ {x:8,z:2,color:0x3b9d9b,label:"Humedal"},
+ {x:0,z:8.5,color:0xc2a64c,label:"Pradera floral"}
+];
+for(const zone of biomeZones){
+ const patch=new THREE.Mesh(new THREE.CircleGeometry(3.15,32),new THREE.MeshStandardMaterial({color:zone.color,roughness:1}));
+ patch.rotation.x=-Math.PI/2;patch.position.set(zone.x,.245,zone.z);scene.add(patch);
+}
+// Ranas cúbicas y grillos estilizados: saltan y se mueven en su hábitat.
+const frogs=[],crickets=[];
+const frogMat=new THREE.MeshStandardMaterial({color:0x55bb54,roughness:.8});
+const cricketMat=new THREE.MeshStandardMaterial({color:0x354b28,roughness:.8});
+for(const zone of biomeZones){
+ for(let n=0;n<3;n++){
+  const frog=new THREE.Group();scene.add(frog);
+  const bodyF=new THREE.Mesh(new THREE.SphereGeometry(.24,10,8),frogMat);bodyF.scale.set(1.2,.72,1);bodyF.position.y=.27;frog.add(bodyF);
+  const eyeF=new THREE.Mesh(new THREE.SphereGeometry(.075,8,6),mat.white);eyeF.position.set(0,.43,-.13);frog.add(eyeF);
+  const pupil=new THREE.Mesh(new THREE.SphereGeometry(.035,8,6),mat.black);pupil.position.set(0,.44,-.195);frog.add(pupil);
+  frog.position.set(zone.x+(n-1)*1.15,.25,zone.z+(n%2?-.8:.8));frog.userData={phase:n*.9+zone.x,speed:1+n*.15,baseY:.25,zone};frogs.push(frog);
+  const bug=new THREE.Group();scene.add(bug);
+  const bugBody=new THREE.Mesh(new THREE.SphereGeometry(.09,7,6),cricketMat);bugBody.scale.set(.65,.6,1.5);bug.add(bugBody);
+  for(const side of [-1,1]){const leg=new THREE.Mesh(new THREE.BoxGeometry(.035,.22,.035),cricketMat);leg.position.set(side*.11,-.1,0);leg.rotation.z=side*.5;bug.add(leg);}
+  bug.position.set(zone.x+(n-1)*.9,.32,zone.z+1.35);bug.userData={phase:n*1.7+zone.z,zone};crickets.push(bug);
+ }
+}
+
+// FAUNA ADICIONAL: aves, mariposas y pequeños mamíferos recorren la isla.
+const extraAnimals=[];
+const birdMat=new THREE.MeshStandardMaterial({color:0x3c526e,roughness:.85});
+const butterflyMat=new THREE.MeshStandardMaterial({color:0xf0a4ce,roughness:.65});
+const rabbitMat=new THREE.MeshStandardMaterial({color:0xd9d0bd,roughness:.9});
+for(let i=0;i<5;i++){
+ const bird=new THREE.Group();
+ const torso=new THREE.Mesh(new THREE.SphereGeometry(.20,9,7),birdMat);torso.scale.set(1.25,.65,.75);bird.add(torso);
+ const wingL=new THREE.Mesh(new THREE.BoxGeometry(.42,.055,.25),birdMat);wingL.position.set(-.22,.08,0);bird.add(wingL);
+ const wingR=wingL.clone();wingR.position.x=.22;bird.add(wingR);
+ bird.position.set(-8+i*4,2.7+(i%2)*.45,-5+(i%3)*2);
+ bird.userData={kind:"bird",phase:i*1.4,centerX:bird.position.x,centerZ:bird.position.z,wingL,wingR};
+ scene.add(bird);extraAnimals.push(bird);
+}
+for(let i=0;i<6;i++){
+ const butterfly=new THREE.Group();
+ const bodyB=new THREE.Mesh(new THREE.CapsuleGeometry(.035,.2,3,5),cricketMat);butterfly.add(bodyB);
+ const left=new THREE.Mesh(new THREE.CircleGeometry(.18,8),butterflyMat);left.position.set(-.14,.03,0);left.rotation.y=-.35;butterfly.add(left);
+ const right=left.clone();right.position.x=.14;right.rotation.y=.35;butterfly.add(right);
+ butterfly.position.set(-8+Math.random()*16,.9,-6+Math.random()*12);
+ butterfly.userData={kind:"butterfly",phase:i*1.7,base:butterfly.position.clone(),left,right};
+ scene.add(butterfly);extraAnimals.push(butterfly);
+}
+for(let i=0;i<4;i++){
+ const rabbit=new THREE.Group();
+ const bodyR=new THREE.Mesh(new THREE.SphereGeometry(.23,10,8),rabbitMat);bodyR.scale.set(1,.8,1.35);bodyR.position.y=.28;rabbit.add(bodyR);
+ const headR=new THREE.Mesh(new THREE.SphereGeometry(.16,10,8),rabbitMat);headR.position.set(0,.43,-.22);rabbit.add(headR);
+ for(const s of [-1,1]){const ear=new THREE.Mesh(new THREE.BoxGeometry(.07,.32,.08),rabbitMat);ear.position.set(s*.09,.68,-.23);ear.rotation.z=s*-.12;rabbit.add(ear);}
+ rabbit.position.set(-7+(i%2)*13,.25,-6+Math.floor(i/2)*8);
+ rabbit.userData={kind:"rabbit",phase:i*2,homeX:rabbit.position.x,homeZ:rabbit.position.z};
+ scene.add(rabbit);extraAnimals.push(rabbit);
+}
+
+// COLECCIONABLES: seis fragmentos de rompecabezas y dos anillos dorados.
+// Se recogen al tocarlos; el progreso queda visible en la interfaz.
+let puzzleCount=0,ringCount=0;
+const puzzlePieces=[],goldRings=[];
+const puzzleMat=new THREE.MeshStandardMaterial({color:0x39bde0,metalness:.25,roughness:.35,emissive:0x073849});
+const ringMat=new THREE.MeshStandardMaterial({color:0xffcf32,metalness:.85,roughness:.18,emissive:0x4c3000});
+const puzzleSpots=[[-8,-5],[-5,7],[0,-7],[5,7],[8,-4],[1,4]];
+for(let i=0;i<puzzleSpots.length;i++){
+ const shape=new THREE.Shape();
+ shape.moveTo(-.28,-.24);shape.lineTo(.28,-.24);shape.lineTo(.28,-.08);
+ shape.absarc(.38,0,.10,-Math.PI/2,Math.PI/2,false);
+ shape.lineTo(.28,.24);shape.lineTo(-.28,.24);shape.lineTo(-.28,.08);
+ shape.absarc(-.38,0,.10,Math.PI/2,-Math.PI/2,true);shape.closePath();
+ const piece=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:.07,bevelEnabled:true,bevelSegments:1,steps:1,bevelSize:.025,bevelThickness:.025}),puzzleMat);
+ piece.rotation.x=-Math.PI/2;piece.position.set(puzzleSpots[i][0],.34,puzzleSpots[i][1]);
+ piece.userData={baseY:.34,phase:i*.8,collected:false};
+ scene.add(piece);puzzlePieces.push(piece);
+}
+for(const spot of [[-6,0],[6,-1]]){
+ const ring=new THREE.Mesh(new THREE.TorusGeometry(.48,.095,10,28),ringMat);
+ ring.position.set(spot[0],1.05,spot[1]);ring.rotation.x=Math.PI/2;
+ ring.userData={baseY:1.05,phase:spot[0],collected:false};
+ scene.add(ring);goldRings.push(ring);
+}
+function updateCollectibles(dt){
+ const t=clock.elapsedTime;
+ for(const p of puzzlePieces){
+  if(p.userData.collected)continue;
+  p.rotation.z+=dt*.8;p.position.y=p.userData.baseY+Math.sin(t*2.2+p.userData.phase)*.09;
+  if(Math.hypot(player.root.position.x-p.position.x,player.root.position.z-p.position.z)<.85){
+   p.userData.collected=true;scene.remove(p);puzzleCount++;
+  }
+ }
+ for(const r of goldRings){
+  if(r.userData.collected)continue;
+  r.rotation.z+=dt*1.7;r.position.y=r.userData.baseY+Math.sin(t*2.5+r.userData.phase)*.13;
+  if(Math.hypot(player.root.position.x-r.position.x,player.root.position.z-r.position.z)<.95){
+   r.userData.collected=true;scene.remove(r);ringCount++;
+  }
+ }
+ setText(uiCollect,"🧩 "+puzzleCount+"/6 piezas · 💍 "+ringCount+"/2 anillos"+(puzzleCount===6&&ringCount===2?" · 🏆 ¡Premio desbloqueado!":""));
+}
+function updateExtraAnimals(dt){
+ const t=clock.elapsedTime;
+ for(const a of extraAnimals){
+  const u=a.userData;
+  if(u.kind==="bird"){
+   a.position.x=u.centerX+Math.sin(t*.42+u.phase)*1.5;
+   a.position.y=2.7+Math.sin(t*2+u.phase)*.22;
+   a.position.z=u.centerZ+Math.cos(t*.35+u.phase)*1.2;
+   u.wingL.rotation.z=Math.sin(t*12+u.phase)*.55;
+   u.wingR.rotation.z=-Math.sin(t*12+u.phase)*.55;
+  }else if(u.kind==="butterfly"){
+   a.position.x=u.base.x+Math.sin(t*1.3+u.phase)*.8;
+   a.position.y=u.base.y+Math.sin(t*3+u.phase)*.25;
+   a.position.z=u.base.z+Math.cos(t*1.1+u.phase)*.7;
+   u.left.rotation.y=Math.sin(t*14+u.phase)*.65;
+   u.right.rotation.y=-Math.sin(t*14+u.phase)*.65;
+  }else{
+   a.position.x=u.homeX+Math.sin(t*.7+u.phase)*.45;
+   a.position.z=u.homeZ+Math.cos(t*.55+u.phase)*.35;
+   a.rotation.y=Math.sin(t*.7+u.phase)*.3;
+  }
+ }
+}
+
+let touchedBiome="";
+function updateNature(dt){
+ const t=clock.elapsedTime;
+ for(const f of frogs){f.position.y=f.userData.baseY+Math.max(0,Math.sin(t*f.userData.speed*2+f.userData.phase))*.48;f.rotation.z=Math.sin(t*2+f.userData.phase)*.08;}
+ for(const c of crickets){c.position.x+=Math.sin(t*1.4+c.userData.phase)*dt*.12;c.rotation.y=Math.sin(t*2+c.userData.phase)*.3;}
+ touchedBiome="";
+ for(const z of biomeZones){if(Math.hypot(player.root.position.x-z.x,player.root.position.z-z.z)<3.1){touchedBiome=z.label;break;}}
+}
+const playerKnockback=new THREE.Vector3(),npcKnockback=new THREE.Vector3();
+const DUEL_PLAYER_RANGE=2.6,DUEL_NPC_RANGE=1.9,DUEL_NPC_SWING=.35;
+let npcAttackCd=0,npcSwing=0,npcHitDone=true,duelHitDone=true,duelMsg="",duelMsgTime=0;
+function startDuel(){
+ if(fightMode)return;
+ fightMode=true;playerFightHealth=5;npcFightHealth=5;
+ npcAttackCd=1;npcSwing=0;npcHitDone=true;duelHitDone=true;duelMsgTime=0;
+ playerKnockback.set(0,0,0);npcKnockback.set(0,0,0);
+ npcBlade.visible=true;
+}
+function endDuel(won){
+ fightMode=false;npcBlade.visible=false;npcBlade.rotation.x=0;npcSwing=0;
+ playerKnockback.set(0,0,0);npcKnockback.set(0,0,0);
+ playerFightHealth=5;npcFightHealth=5;
+ duelMsg=won?"🏆 ¡Ganaste el duelo! · Y: otro duelo":"💀 Perdiste el duelo · Y: intentarlo de nuevo";
+ duelMsgTime=4;
+}
+function updateDuel(dt){
+ if(duelMsgTime>0)duelMsgTime=Math.max(0,duelMsgTime-dt);
+ if(!fightMode)return;
+ const dx=player.root.position.x-npc.root.position.x;
+ const dz=player.root.position.z-npc.root.position.z;
+ const dist=Math.hypot(dx,dz);
+ const nx=dist>.001?dx/dist:1,nz=dist>.001?dz/dist:0;
+ if(dist>.001)npc.root.rotation.y=Math.atan2(-nx,-nz);
+
+ // Retroceso con fricción, respetando colisiones.
+ if(playerKnockback.lengthSq()>.01)moveCharacter(player,playerKnockback.x*dt,playerKnockback.z*dt);
+ if(npcKnockback.lengthSq()>.01)moveCharacter(npc,npcKnockback.x*dt,npcKnockback.z*dt);
+ const decay=Math.exp(-4.2*dt);
+ playerKnockback.multiplyScalar(decay);npcKnockback.multiplyScalar(decay);
+
+ // Golpe del jugador con J.
+ if(swordSwing>.18&&!duelHitDone&&dist<DUEL_PLAYER_RANGE){
+  duelHitDone=true;
+  npcFightHealth=Math.max(0,npcFightHealth-1);
+  npcKnockback.set(-nx*9,0,-nz*9);npc.velocityY=4.2;npc.grounded=false;
+  if(npcFightHealth<=0){endDuel(true);return;}
+ }
+
+ // Ataque del NPC.
+ npcAttackCd-=dt;
+ if(npcSwing>0){
+  npcSwing=Math.max(0,npcSwing-dt);
+  npcBlade.rotation.x=npcSwing>0?-Math.sin((1-npcSwing/DUEL_NPC_SWING)*Math.PI)*1.5:0;
+  if(!npcHitDone&&npcSwing<=DUEL_NPC_SWING*.5){
+   npcHitDone=true;
+   if(dist<DUEL_NPC_RANGE+.4){
+    playerFightHealth=Math.max(0,playerFightHealth-1);
+    playerKnockback.set(nx*9,0,nz*9);player.velocityY=4.2;player.grounded=false;
+    if(playerFightHealth<=0){endDuel(false);return;}
+   }
+  }
+ }else if(npcAttackCd<=0&&dist<DUEL_NPC_RANGE){
+  npcAttackCd=1.4;npcSwing=DUEL_NPC_SWING;npcHitDone=false;
+ }
+}
+
+npc.root.rotation.y=-Math.PI/2;
+
+// Evitar que las piezas de los personajes sean obstáculos.
+obstacles.length=worldObstacleCount;
+
+// CONTROLES
+const keys={
+forward:false,
+backward:false,
+left:false,
+right:false,
+jump:false,
+roll:false
+};
+
+let dancing=false;
+let danceTime=0;
+
+function setKey(e,pressed){
+if(e.key&&e.key.toLowerCase()==="y"){if(pressed&&!e.repeat)startDuel();return;}
+switch(e.code){
+case "KeyW":
+case "ArrowUp":
+keys.forward=pressed;
+break;
+
+case "KeyS":
+case "ArrowDown":
+keys.backward=pressed;
+break;
+
+case "KeyA":
+case "ArrowLeft":
+keys.left=pressed;
+break;
+
+case "KeyD":
+case "ArrowRight":
+keys.right=pressed;
+break;
+
+case "Space":
+keys.jump=pressed;
+e.preventDefault();
+break;
+
+case "KeyF":
+keys.roll=pressed;
+break;
+case "KeyJ":
+if(pressed&&!e.repeat&&swordCooldown<=0){swordCooldown=.48;swordSwing=.42;rollHitDone=false;duelHitDone=false;swordSwingActive=true;sword.rotation.z=-1.25;}
+break;
+
+case "KeyN":
+if(pressed&&!e.repeat){cycleOutfit();}
+break;
+
+case "KeyV":
+if(pressed&&!e.repeat){
+dancing=!dancing;
+}
+break;
+}
+}
+
+addEventListener("keydown",e=>setKey(e,true));
+addEventListener("keyup",e=>setKey(e,false));
+
+addEventListener("blur",()=>{
+keys.forward=false;
+keys.backward=false;
+keys.left=false;
+keys.right=false;
+keys.jump=false;
+keys.roll=false;
+});
+
+// PARÁMETROS
+const RADIUS=.38;
+const SPEED=14;
+const JUMP=18;
+const GRAVITY=22;
+const CHARACTER_HEIGHT=2.35;
+const clock=new THREE.Clock();
+
+// COLISIONES
+function collides(x,z,ch){
+const feet=ch.root.position.y;
+const head=feet+CHARACTER_HEIGHT;
+
+for(const o of obstacles){
+
+// Pasillo despejado hacia la cueva: evita que árboles/arbustos aleatorios
+// bloqueen el acceso. El corredor queda entre las rocas laterales de la entrada.
+
+
+// Ignorar obstáculos que estén por encima o debajo del personaje.
+if(head<=o.minY+.02||feet>=o.maxY-.02)continue;
+
+const px=THREE.MathUtils.clamp(
+x,
+o.x-o.w/2,
+o.x+o.w/2
+);
+
+const pz=THREE.MathUtils.clamp(
+z,
+o.z-o.d/2,
+o.z+o.d/2
+);
+
+const dx=x-px;
+const dz=z-pz;
+
+if(dx*dx+dz*dz<RADIUS*RADIUS)return true;
+}
+
+return false;
+}
+
+// MOVIMIENTO CON DESLIZAMIENTO LATERAL
+function moveCharacter(ch,dx,dz){
+const startX=ch.root.position.x;
+const startZ=ch.root.position.z;
+
+const distance=Math.hypot(dx,dz);
+const steps=Math.max(1,Math.ceil(distance/.12));
+const stepX=dx/steps;
+const stepZ=dz/steps;
+
+for(let i=0;i<steps;i++){
+
+const nextX=ch.root.position.x+stepX;
+
+if(!collides(nextX,ch.root.position.z,ch)){
+ch.root.position.x=nextX;
+}
+
+const nextZ=ch.root.position.z+stepZ;
+
+if(!collides(ch.root.position.x,nextZ,ch)){
+ch.root.position.z=nextZ;
+}
+}
+
+return Math.hypot(
+ch.root.position.x-startX,
+ch.root.position.z-startZ
+)>.0001;
+}
+
+// REAPARICIÓN
+function respawn(ch){
+if(ch===player){
+ch.root.position.set(0,22,8);
+}else{
+ch.root.position.set(-1,22,1);
+}
+
+ch.velocityY=0;
+ch.grounded=false;
+ch.falling=true;
+ch.jumpPressed=false;
+}
+
+// FÍSICAS
+function physics(ch,dt){
+const oldY=ch.root.position.y;
+
+ch.velocityY-=GRAVITY*dt;
+ch.root.position.y+=ch.velocityY*dt;
+
+let landed=false;
+
+if(ch.velocityY<=0){
+
+let landingSurface=null;
+
+for(const o of obstacles){
+
+const nearX=Math.abs(ch.root.position.x-o.x)<o.w/2+RADIUS;
+const nearZ=Math.abs(ch.root.position.z-o.z)<o.d/2+RADIUS;
+const y=ch.root.position.y;
+
+if(
+nearX&&
+nearZ&&
+oldY>=o.maxY&&
+y<=o.maxY&&
+(!landingSurface||o.maxY>landingSurface.maxY)
+){
+landingSurface=o;
+}
+}
+
+if(landingSurface){
+ch.root.position.y=landingSurface.maxY;
+ch.velocityY=0;
+ch.grounded=true;
+ch.falling=false;
+landed=true;
+}
+}
+
+// SUPERFICIE DE LA ISLA
+const inside=
+ch.root.position.x>bounds.minX+.1&&ch.root.position.x<bounds.maxX-.1&&
+ch.root.position.z>bounds.minZ+.1&&ch.root.position.z<bounds.maxZ-.1;
+
+if(
+!landed&&
+inside&&
+ch.velocityY<=0&&
+oldY>=.25&&
+ch.root.position.y<=.25
+){
+ch.root.position.y=.25;
+ch.velocityY=0;
+ch.grounded=true;
+ch.falling=false;
+landed=true;
+}
+
+if(!landed&&ch.velocityY>0){
+ch.grounded=false;
+ch.falling=false;
+}
+
+if(ch.root.position.y<-5){
+respawn(ch);
+}
+}
+
+// ANIMACIONES
+function animateCharacter(ch,moving,dt,phase=0){
+
+if(dancing){
+
+const t=danceTime+phase;
+
+// BRAZOS
+ch.arms[0].rotation.x=Math.sin(t*5)*1.15;
+ch.arms[1].rotation.x=Math.sin(t*5+Math.PI)*1.15;
+
+ch.arms[0].rotation.z=.35+Math.sin(t*3)*.55;
+ch.arms[1].rotation.z=-.35-Math.sin(t*3)*.55;
+
+// PIERNAS
+ch.legs[0].rotation.x=Math.sin(t*5)*.85;
+ch.legs[1].rotation.x=Math.sin(t*5+Math.PI)*.85;
+
+ch.legs[0].rotation.z=Math.sin(t*2.5)*.2;
+ch.legs[1].rotation.z=-Math.sin(t*2.5)*.2;
+
+// CABEZA
+ch.head.rotation.x=Math.sin(t*4)*.13;
+ch.head.rotation.y=Math.sin(t*2.5)*.28;
+ch.head.rotation.z=Math.sin(t*3)*.18;
+
+// CUERPO Y COLA
+ch.body.rotation.z=Math.sin(t*5)*.12;
+ch.body.rotation.y=Math.sin(t*2.5)*.12;
+
+if(ch.tail){
+ch.tail.rotation.x=Math.sin(t*5)*.5;
+}
+
+return;
+}
+
+// ANIMACIÓN NORMAL
+ch.head.rotation.set(0,0,0);
+ch.body.rotation.y=0;
+
+if(moving&&ch.grounded){
+
+ch.walkTime+=dt*12;
+
+ch.legs[0].rotation.x=Math.sin(ch.walkTime)*.65;
+ch.legs[1].rotation.x=-Math.sin(ch.walkTime)*.65;
+
+ch.arms[0].rotation.x=-Math.sin(ch.walkTime)*.55;
+ch.arms[1].rotation.x=Math.sin(ch.walkTime)*.55;
+
+if(ch.tail){
+ch.tail.rotation.x=Math.sin(ch.walkTime)*.2;
+}
+
+}else{
+
+ch.legs.forEach(p=>p.rotation.x=0);
+ch.arms.forEach(p=>p.rotation.x=0);
+}
+
+ch.arms.forEach(p=>p.rotation.z=0);
+ch.legs.forEach(p=>p.rotation.z=0);
+
+ch.body.rotation.z=
+moving&&ch.grounded?
+Math.sin(ch.walkTime*2)*.035:0;
+}
+
+// MOVIMIENTO DEL JUGADOR
+function updatePlayer(dt){
+const ch=player;
+
+// GIRO
+if(keys.left){
+ch.root.rotation.y+=2.5*dt;
+}
+
+if(keys.right){
+ch.root.rotation.y-=2.5*dt;
+}
+
+// RODAR con F: impulso frontal breve, con enfriamiento para controlar el combate.
+rollCooldown=Math.max(0,rollCooldown-dt);
+if(keys.roll&&rollCooldown<=0&&rollingTime<=0){
+ rollingTime=.52;rollCooldown=.72;rollHitDone=false;
+}
+if(rollingTime>0){
+ rollingTime=Math.max(0,rollingTime-dt);
+ const rollSpeed=18;
+ const moved=moveCharacter(ch,-Math.sin(ch.root.rotation.y)*rollSpeed*dt,
+  -Math.cos(ch.root.rotation.y)*rollSpeed*dt);
+ ch.body.rotation.z=Math.sin((.52-rollingTime)*28)*.55;
+}else{
+ ch.body.rotation.z=0;
+}
+
+// AVANCE Y RETROCESO
+let direction=0;
+
+if(keys.forward)direction+=1;
+if(keys.backward)direction-=1;
+
+let moving=false;
+
+if(direction!==0&&rollingTime<=0){
+
+const dx=-Math.sin(ch.root.rotation.y)*SPEED*dt*direction;
+const dz=-Math.cos(ch.root.rotation.y)*SPEED*dt*direction;
+
+moving=moveCharacter(ch,dx,dz);
+}
+
+// SALTO
+if(keys.jump&&!ch.jumpPressed&&ch.grounded){
+ch.velocityY=JUMP;
+ch.grounded=false;
+}
+
+ch.jumpPressed=keys.jump;
+
+physics(ch,dt);
+if(rollingTime<=0)animateCharacter(ch,moving,dt,0);
+}
+
+// IA DEL NPC
+function updateNPC(dt){
+ const ch=npc;
+  const dx=player.root.position.x-ch.root.position.x;
+ const dz=player.root.position.z-ch.root.position.z;
+ const distance=Math.hypot(dx,dz);
+ let moving=false;
+
+ // Persecución directa y continua: no depende del buscador de rutas ni de
+ // colisiones con decoración, que podían dejar al NPC inmóvil.
+ if(distance>1.25){
+  const step=Math.min(7.5*dt, distance-1.05);
+  const nx=dx/(distance||1), nz=dz/(distance||1);
+  ch.root.position.x+=nx*step;
+  ch.root.position.z+=nz*step;
+  ch.root.rotation.y=Math.atan2(-nx,-nz);
+  moving=step>.001;
+ }
+ physics(ch,dt);
+ animateCharacter(ch,moving,dt,1.2);
+}
+
+// CÁMARA Y BUCLE PRINCIPAL
+function animate(){
+requestAnimationFrame(animate);
+
+const dt=Math.min(clock.getDelta(),.05);
+
+if(dancing){
+danceTime+=dt;
+}
+
+playerDamageCooldown=Math.max(0,playerDamageCooldown-dt);
+swordSwing=Math.max(0,swordSwing-dt);
+checkExpansion();
+if(uiHealthFill)uiHealthFill.style.width=(dragonHealth/8*100)+"%";
+setText(uiHealthText,dragonDefeated?"Derrotado":dragonHealth+" / 8");
+updatePlayer(dt);
+updateNPC(dt);
+updateDuel(dt);
+updateNature(dt);
+updateExtraAnimals(dt);
+updateCollectibles(dt);
+updateDragon(dt);
+updateDayNight(dt);
+swordCooldown=Math.max(0,swordCooldown-dt);
+if(swordSwing<=0)swordSwingActive=false;
+if(swordCooldown<=.22)sword.rotation.z=THREE.MathUtils.lerp(sword.rotation.z,-.45,Math.min(1,dt*12));
+playerBurn=Math.max(0,playerBurn-dt);burnFx.visible=playerBurn>0;burnFx.rotation.y+=dt*3;burnFx.scale.setScalar(.9+Math.sin(clock.elapsedTime*18)*.12);
+for(const b of bats){if(b.userData.dead)continue;const a=clock.elapsedTime*b.userData.speed+b.userData.phase;const bx=Math.cos(a)*b.userData.radius,bz=Math.sin(a)*b.userData.radius-2;const nearPlayer=Math.hypot(bx-player.root.position.x,bz-player.root.position.z)<5.2;const flyY=nearPlayer?1.75+Math.sin(a*2)*.28:b.userData.height+Math.sin(a*2)*.65;b.position.set(bx,flyY,bz);b.rotation.y=-a+Math.PI/2;b.userData.wings[0].rotation.z=Math.sin(clock.elapsedTime*13+b.userData.phase)*.8;b.userData.wings[1].rotation.z=-Math.sin(clock.elapsedTime*13+b.userData.phase)*.8;}
+updateBatSwordHits();
+setText(uiBat,"🦇 Murciélagos derrotados: "+batsDefeated+"/"+bats.length);
+
+// CÁMARA SIGUE AL JUGADOR
+const target=new THREE.Vector3(
+player.root.position.x+24,
+player.root.position.y+30,
+player.root.position.z+32
+);
+
+camera.position.lerp(target,1-Math.exp(-3*dt));
+
+camera.lookAt(
+player.root.position.x,
+player.root.position.y+1,
+player.root.position.z
+);
+sky.position.copy(camera.position);
+
+// ESTADO
+setText(uiStatus,
+dancing?"💃 ¡Todos bailando! · V para detener":
+fightMode?"⚔️ ¡Duelo! · J: atacar · Jugador "+playerFightHealth+"/5 · NPC "+npcFightHealth+"/5":
+duelMsgTime>0?duelMsg:
+player.falling?"¡Regresando a la isla!":
+npc.falling?"¡El NPC está reapareciendo!":
+dragonDefeated?"🏆 ¡Dragón derrotado! · Y: duelo con el NPC":
+playerBurn>0?"🔥 ¡Estás en llamas! ¡Vas a caer desde el cielo!":
+touchedBiome?"🌿 Explorando: "+touchedBiome+" · N: cambiar traje · 🦇 "+batsDefeated+"/7":"🐉 Dragón en el castillo · J: atacar murciélagos · F: rodar · N: cambiar traje (incluye recolección) · Y: duelo · 🦇 "+batsDefeated+"/7");
+
+renderer.render(scene,camera);
+}
+
+animate();
+
+})();
+</script>
+</body>
+</html>
